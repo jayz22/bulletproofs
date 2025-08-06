@@ -25,11 +25,7 @@ use rand_core::{CryptoRng, RngCore};
 use serde::de::Visitor;
 use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
 
-// Modules for MPC protocol
-
-pub mod dealer;
-pub mod messages;
-pub mod party;
+// Direct range proof implementation for confidential transactions
 
 /// The `RangeProof` struct represents a proof that one or more values
 /// are in a range.
@@ -230,6 +226,19 @@ impl RangeProof {
     /// );
     /// # }
     /// ```
+    /// Create aggregated range proofs using direct construction (Section 4.3 of Bulletproofs paper).
+    /// 
+    /// This implementation follows the non-interactive aggregated range proof protocol from the
+    /// original Bulletproofs paper, removing the multi-party computation aspects present in the
+    /// original zkcrypto implementation.
+    /// 
+    /// # Protocol Overview
+    /// 1. Bit-decompose values and create vector commitment A using conditional assignment
+    /// 2. Create blinding vector commitment S
+    /// 3. Use Fiat-Shamir to derive challenges y, z from transcript
+    /// 4. Construct polynomial l(x), r(x) with coefficients based on bit decompositions
+    /// 5. Compute polynomial t(x) = <l(x), r(x)> and commit to its coefficients
+    /// 6. Evaluate polynomials at challenge point x and create inner product proof
     pub fn prove_multiple_with_rng<T: RngCore + CryptoRng>(
         bp_gens: &BulletproofGens,
         pc_gens: &PedersenGens,
@@ -237,53 +246,262 @@ impl RangeProof {
         values: &[u64],
         blindings: &[Scalar],
         n: usize,
-        rng: &mut T,
+        _rng: &mut T,
     ) -> Result<(RangeProof, Vec<CompressedRistretto>), ProofError> {
-        use self::dealer::*;
-        use self::party::*;
-
         if values.len() != blindings.len() {
             return Err(ProofError::WrongNumBlindingFactors);
         }
 
-        let dealer = Dealer::new(bp_gens, pc_gens, transcript, n, values.len())?;
+        let m = values.len();
 
-        let parties: Vec<_> = values
+        // Validation checks inherited from original zkcrypto implementation
+        // These constraints ensure compatibility with the generator system and
+        // maintain the power-of-two requirements needed for efficient inner product proofs
+        if !(n == 8 || n == 16 || n == 32 || n == 64) {
+            return Err(ProofError::InvalidBitsize);
+        }
+
+        // Bulletproofs aggregation requires m to be power of 2 for optimal inner product proof size
+        if !m.is_power_of_two() {
+            return Err(ProofError::InvalidAggregation);
+        }
+
+        // Ensure we have sufficient generators for the proof dimensions
+        if bp_gens.gens_capacity < n {
+            return Err(ProofError::InvalidGeneratorsLength);
+        }
+
+        if bp_gens.party_capacity < m {
+            return Err(ProofError::InvalidGeneratorsLength);
+        }
+
+        // Create Pedersen commitments V_i = v_i * G + r_i * H for each value
+        // These commitments will be public inputs to the range proof verification
+        let value_commitments: Vec<CompressedRistretto> = values
             .iter()
             .zip(blindings.iter())
-            .map(|(&v, &v_blinding)| Party::new(bp_gens, pc_gens, v, v_blinding, n))
-            // Collect the iterator of Results into a Result<Vec>, then unwrap it
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|(&value, &blinding)| pc_gens.commit(Scalar::from(value), blinding).compress())
+            .collect();
 
-        let (parties, bit_commitments): (Vec<_>, Vec<_>) = parties
-            .into_iter()
-            .enumerate()
-            .map(|(j, p)| {
-                p.assign_position_with_rng(j, rng)
-                    .expect("We already checked the parameters, so this should never happen")
-            })
-            .unzip();
+        // Initialize transcript with domain separator (follows Merlin transcript protocol)
+        // This binds the proof to specific dimensions (n-bit range, m values)
+        transcript.rangeproof_domain_sep(n as u64, m as u64);
 
-        let value_commitments: Vec<_> = bit_commitments.iter().map(|c| c.V_j).collect();
+        // Add value commitments to transcript (makes them part of Fiat-Shamir challenge derivation)
+        // This step is crucial for binding the proof to the specific commitments being proven
+        for V in &value_commitments {
+            transcript.append_point(b"V", V);
+        }
 
-        let (dealer, bit_challenge) = dealer.receive_bit_commitments(bit_commitments)?;
-
-        let (parties, poly_commitments): (Vec<_>, Vec<_>) = parties
-            .into_iter()
-            .map(|p| p.apply_challenge_with_rng(&bit_challenge, rng))
-            .unzip();
-
-        let (dealer, poly_challenge) = dealer.receive_poly_commitments(poly_commitments)?;
-
-        let proof_shares: Vec<_> = parties
-            .into_iter()
-            .map(|p| p.apply_challenge(&poly_challenge))
-            // Collect the iterator of Results into a Result<Vec>, then unwrap it
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let proof = dealer.receive_trusted_shares(&proof_shares)?;
-
-        Ok((proof, value_commitments))
+        // === PHASE 1: BIT DECOMPOSITION AND VECTOR COMMITMENT A ===
+        // Direct range proof construction following Section 4.3 of Bulletproofs paper
+        let nm = n * m;  // Total dimension of vectors (n bits per value × m values)
+        
+        // Initialize bit decomposition vectors a_L, a_R where:
+        // a_L[i] ∈ {0,1} represents the i-th bit
+        // a_R[i] = a_L[i] - 1 ∈ {-1,0} (this creates the constraint a_L ∘ a_R = 0)
+        let mut a_L = Vec::with_capacity(nm);
+        let mut a_R = Vec::with_capacity(nm);
+        
+        // Generate cryptographic blinding factors for commitment security
+        // These prevent the verifier from learning anything about the committed values
+        let a_blinding = Scalar::random(_rng);
+        let s_blinding = Scalar::random(_rng);
+        
+        // Generate random masking vectors for the S commitment
+        // These will be used to create the blinding commitment S = <s_L, G> + <s_R, H> + s_blinding*B
+        let s_L: Vec<Scalar> = (0..nm).map(|_| Scalar::random(_rng)).collect();
+        let s_R: Vec<Scalar> = (0..nm).map(|_| Scalar::random(_rng)).collect();
+        
+        // === Bit decomposition with conditional assignment (inspired by Solana's implementation) ===
+        // This approach is more efficient than computing separate scalar multiplications
+        use subtle::{Choice, ConditionallySelectable};
+        // Initialize A commitment with blinding component: A = a_blinding * B + Σ(conditional points)
+        let mut A = pc_gens.B_blinding * a_blinding;
+        
+        // Iterate through generator pairs (G_i, H_i) for each bit position
+        let mut gens_iter = bp_gens.G(n, m).zip(bp_gens.H(n, m));
+        for &value in values {
+            for i in 0..n {  // Process each bit position (LSB first)
+                let (G_i, H_i) = gens_iter.next().unwrap();
+                let bit = (value >> i) & 1;  // Extract i-th bit using bit shift
+                a_L.push(Scalar::from(bit));  // Store bit as scalar (0 or 1)
+                a_R.push(Scalar::from(bit) - Scalar::ONE);  // a_R[i] = a_L[i] - 1 ∈ {-1, 0}
+                
+                // === CONDITIONAL ASSIGNMENT TECHNIQUE (from Solana implementation) ===
+                // Instead of: A += a_L[i] * G_i + a_R[i] * H_i
+                // We use: A += (bit == 0) ? -H_i : G_i
+                // This is equivalent but more efficient since a_L[i] ∈ {0,1} and a_R[i] ∈ {-1,0}
+                let bit_choice = Choice::from(bit as u8);
+                let mut point = -H_i;  // Default: add -H_i (when bit = 0)
+                point.conditional_assign(G_i, bit_choice);  // If bit = 1, use G_i instead
+                A += point;
+            }
+        }
+        
+        // === PHASE 2: BLINDING VECTOR COMMITMENT S ===
+        // Compute S = s_blinding * B + <s_L, G> + <s_R, H>
+        // This commitment hides the masking vectors s_L, s_R that will be revealed later
+        use curve25519_dalek::traits::MultiscalarMul;
+        let S = RistrettoPoint::multiscalar_mul(
+            // Scalars: [s_blinding, s_L[0], ..., s_L[nm-1], s_R[0], ..., s_R[nm-1]]
+            iter::once(s_blinding).chain(s_L.iter().cloned()).chain(s_R.iter().cloned()),
+            // Points: [B, G[0], ..., G[nm-1], H[0], ..., H[nm-1]]
+            iter::once(&pc_gens.B_blinding)
+                .chain(bp_gens.G(n, m))
+                .chain(bp_gens.H(n, m)),
+        );
+        
+        // === FIAT-SHAMIR CHALLENGE DERIVATION ===
+        // Add A and S commitments to transcript - this binds the challenges to our specific proof
+        transcript.append_point(b"A", &A.compress());
+        transcript.append_point(b"S", &S.compress());
+        
+        // Derive challenges y and z from transcript (replaces interactive verifier challenges)
+        // y: used for creating linear combination of H generators (prevents degeneracy)
+        // z: used for aggregating multiple range proofs into single inner product relation
+        let y = transcript.challenge_scalar(b"y");
+        let z = transcript.challenge_scalar(b"z");
+        
+        // === PHASE 3: POLYNOMIAL CONSTRUCTION ===
+        // Construct degree-1 polynomials l(x), r(x) such that their inner product gives
+        // the desired constraint equation. This is the core of the Bulletproofs protocol.
+        // Note: z^2 will be computed by verifier during verification process
+        let mut l_poly = util::VecPoly1::zero(nm);  // l(x) = l_0 + l_1*x
+        let mut r_poly = util::VecPoly1::zero(nm);  // r(x) = r_0 + r_1*x
+        
+        let mut i = 0;
+        let mut exp_z = z * z; // Start at z^2 for the first value (z^0, z^1 reserved)
+        let mut exp_y = Scalar::ONE;  // Running product of powers of y
+        
+        // === POLYNOMIAL COEFFICIENTS (from Bulletproofs Section 4.3) ===
+        for _j in 0..m {  // For each value being proven
+            let mut exp_2 = Scalar::ONE;  // Running product: 2^0, 2^1, 2^2, ...
+            
+            for _k in 0..n {  // For each bit position
+                // Left polynomial: l(x) = (a_L - z*1) + s_L*x
+                // Constant term: a_L[i] - z (shifts bit vector by z)
+                l_poly.0[i] = a_L[i] - z;
+                // Linear term: s_L[i] (blinding vector coefficient)
+                l_poly.1[i] = s_L[i];
+                
+                // Right polynomial: r(x) = y^i * (a_R + z*1) + z^(j+2) * 2^k + y^i * s_R*x
+                // This combines three components:
+                // 1. y^i * (a_R[i] + z): scaled shifted bit complement
+                // 2. z^(j+2) * 2^k: aggregation term for value j, bit k
+                // 3. y^i * s_R[i] * x: scaled blinding (linear term)
+                r_poly.0[i] = exp_y * (a_R[i] + z) + exp_z * exp_2;
+                r_poly.1[i] = exp_y * s_R[i];
+                
+                // Update running products for next iteration
+                exp_y *= y;  // y^0, y^1, y^2, ...
+                exp_2 = exp_2 + exp_2; // Efficient doubling: 2^0, 2^1, 2^2, ...
+                i += 1;
+            }
+            exp_z *= z; // Move to next power: z^2, z^3, z^4, ... for aggregation
+        }
+        
+        // === PHASE 4: INNER PRODUCT POLYNOMIAL ===
+        // Calculate t(x) = <l(x), r(x)> = t_0 + t_1*x + t_2*x^2
+        // This polynomial encodes the constraint that must be satisfied for a valid range proof
+        let t_poly = l_poly.inner_product(&r_poly);
+        
+        // === COMMITMENTS TO POLYNOMIAL COEFFICIENTS ===
+        // We commit to t_1 and t_2 (t_0 can be computed by verifier)
+        // This allows verifier to check the polynomial evaluation without knowing the coefficients
+        let t_1_blinding = Scalar::random(_rng);
+        let t_2_blinding = Scalar::random(_rng);
+        
+        let T_1 = pc_gens.commit(t_poly.1, t_1_blinding);  // T_1 = t_1*G + t_1_blinding*H
+        let T_2 = pc_gens.commit(t_poly.2, t_2_blinding);  // T_2 = t_2*G + t_2_blinding*H
+        
+        // Add T_1, T_2 to transcript for next challenge derivation
+        transcript.append_point(b"T_1", &T_1.compress());
+        transcript.append_point(b"T_2", &T_2.compress());
+        
+        // === PHASE 5: POLYNOMIAL EVALUATION ===
+        // Derive evaluation challenge x from transcript
+        let x = transcript.challenge_scalar(b"x");
+        
+        // Evaluate the polynomial t(x) at the challenge point
+        let t_x = t_poly.eval(x);  // t_x = t_0 + t_1*x + t_2*x^2
+        
+        // === CRITICAL AGGREGATION FORMULA ===
+        // Calculate the aggregated blinding factor for the polynomial evaluation
+        // This must match the verifier's computation for the proof to verify
+        // Formula: Σ(z^(i+2) * r_i) + x*t_1_blinding + x^2*t_2_blinding
+        // where r_i are the original Pedersen commitment blinding factors
+        let mut agg_opening = Scalar::ZERO;
+        let mut exp_z = z;  // Start with z^1
+        for &blinding in blindings {
+            exp_z *= z; // Increment to z^2, z^3, ..., z^(m+1)
+            agg_opening += exp_z * blinding;
+        }
+        
+        // Total blinding for the evaluation: aggregated commitments + polynomial commitments
+        let t_x_blinding = agg_opening + x * t_1_blinding + x * x * t_2_blinding;
+        // Blinding factor for the vector commitment evaluation A + x*S
+        let e_blinding = a_blinding + x * s_blinding;
+        
+        // === EVALUATE POLYNOMIALS AT CHALLENGE POINT ===
+        // These vectors will be used in the inner product proof
+        let l_vec = l_poly.eval(x);  // l(x) = (a_L - z*1) + x*s_L
+        let r_vec = r_poly.eval(x);  // r(x) = y^i*(a_R + z*1) + z^j*2^k + x*y^i*s_R
+        
+        // === COMMIT EVALUATION RESULTS TO TRANSCRIPT ===
+        // These values will be verified against the polynomial commitments
+        transcript.append_scalar(b"t_x", &t_x);
+        transcript.append_scalar(b"t_x_blinding", &t_x_blinding);
+        transcript.append_scalar(b"e_blinding", &e_blinding);
+        
+        // === INNER PRODUCT PROOF SETUP ===
+        // Generate challenge w for the inner product argument
+        let w = transcript.challenge_scalar(b"w");
+        let Q = w * pc_gens.B;  // Generator for inner product commitment
+        
+        // === PHASE 6: INNER PRODUCT PROOF ===
+        // Create an inner product proof for <l_vec, r_vec> with respect to generators G, H'
+        // where H'_i = y^(-i) * H_i (this reweighting is crucial for soundness)
+        
+        // G factors are all 1 (no reweighting needed for G generators)
+        let G_factors: Vec<Scalar> = iter::repeat(Scalar::ONE).take(nm).collect();
+        // H factors are powers of y^(-1) (reweight H generators to break symmetry)
+        let H_factors: Vec<Scalar> = util::exp_iter(y.invert()).take(nm).collect();
+        
+        // Create the recursive inner product proof
+        // This proves knowledge of l_vec, r_vec such that:
+        // P = <l_vec, G> + <r_vec, H'> + <l_vec, r_vec> * Q
+        let ipp_proof = InnerProductProof::create(
+            transcript,
+            &Q,  // Generator for inner product term
+            &G_factors,  // Scaling factors for G generators
+            &H_factors,  // Scaling factors for H generators (y^(-i))
+            bp_gens.G(n, m).cloned().collect(),  // G generator vector
+            bp_gens.H(n, m).cloned().collect(),  // H generator vector
+            l_vec,  // Left vector l(x)
+            r_vec,  // Right vector r(x)
+        );
+        
+        // === PROOF CONSTRUCTION COMPLETE ===
+        // Return the complete range proof and the value commitments
+        // The proof contains all necessary components for verification:
+        // - A, S: Vector commitments to bit decomposition and blinding vectors
+        // - T_1, T_2: Polynomial coefficient commitments
+        // - t_x, t_x_blinding, e_blinding: Evaluation scalars and their blindings
+        // - ipp_proof: Inner product proof for the final verification equation
+        Ok((
+            RangeProof {
+                A: A.compress(),
+                S: S.compress(),
+                T_1: T_1.compress(),
+                T_2: T_2.compress(),
+                t_x,
+                t_x_blinding,
+                e_blinding,
+                ipp_proof,
+            },
+            value_commitments,
+        ))
     }
 
     /// Create a rangeproof for a set of values.
@@ -724,119 +942,4 @@ mod tests {
         singleparty_create_and_verify_helper(64, 8);
     }
 
-    #[test]
-    fn detect_dishonest_party_during_aggregation() {
-        use self::dealer::*;
-        use self::party::*;
-
-        use crate::errors::MPCError;
-
-        // Simulate four parties, two of which will be dishonest and use a 64-bit value.
-        let m = 4;
-        let n = 32;
-
-        let pc_gens = PedersenGens::default();
-        let bp_gens = BulletproofGens::new(n, m);
-
-        use self::rand::Rng;
-        let mut rng = rand::thread_rng();
-        let mut transcript = Transcript::new(b"AggregatedRangeProofTest");
-
-        // Parties 0, 2 are honest and use a 32-bit value
-        let v0 = rng.gen::<u32>() as u64;
-        let v0_blinding = Scalar::random(&mut rng);
-        let party0 = Party::new(&bp_gens, &pc_gens, v0, v0_blinding, n).unwrap();
-
-        let v2 = rng.gen::<u32>() as u64;
-        let v2_blinding = Scalar::random(&mut rng);
-        let party2 = Party::new(&bp_gens, &pc_gens, v2, v2_blinding, n).unwrap();
-
-        // Parties 1, 3 are dishonest and use a 64-bit value
-        let v1 = rng.gen::<u64>();
-        let v1_blinding = Scalar::random(&mut rng);
-        let party1 = Party::new(&bp_gens, &pc_gens, v1, v1_blinding, n).unwrap();
-
-        let v3 = rng.gen::<u64>();
-        let v3_blinding = Scalar::random(&mut rng);
-        let party3 = Party::new(&bp_gens, &pc_gens, v3, v3_blinding, n).unwrap();
-
-        let dealer = Dealer::new(&bp_gens, &pc_gens, &mut transcript, n, m).unwrap();
-
-        let (party0, bit_com0) = party0.assign_position(0).unwrap();
-        let (party1, bit_com1) = party1.assign_position(1).unwrap();
-        let (party2, bit_com2) = party2.assign_position(2).unwrap();
-        let (party3, bit_com3) = party3.assign_position(3).unwrap();
-
-        let (dealer, bit_challenge) = dealer
-            .receive_bit_commitments(vec![bit_com0, bit_com1, bit_com2, bit_com3])
-            .unwrap();
-
-        let (party0, poly_com0) = party0.apply_challenge(&bit_challenge);
-        let (party1, poly_com1) = party1.apply_challenge(&bit_challenge);
-        let (party2, poly_com2) = party2.apply_challenge(&bit_challenge);
-        let (party3, poly_com3) = party3.apply_challenge(&bit_challenge);
-
-        let (dealer, poly_challenge) = dealer
-            .receive_poly_commitments(vec![poly_com0, poly_com1, poly_com2, poly_com3])
-            .unwrap();
-
-        let share0 = party0.apply_challenge(&poly_challenge).unwrap();
-        let share1 = party1.apply_challenge(&poly_challenge).unwrap();
-        let share2 = party2.apply_challenge(&poly_challenge).unwrap();
-        let share3 = party3.apply_challenge(&poly_challenge).unwrap();
-
-        match dealer.receive_shares(&[share0, share1, share2, share3]) {
-            Err(MPCError::MalformedProofShares { bad_shares }) => {
-                assert_eq!(bad_shares, vec![1, 3]);
-            }
-            Err(_) => {
-                panic!("Got wrong error type from malformed shares");
-            }
-            Ok(_) => {
-                panic!("The proof was malformed, but it was not detected");
-            }
-        }
-    }
-
-    #[test]
-    fn detect_dishonest_dealer_during_aggregation() {
-        use self::dealer::*;
-        use self::party::*;
-        use crate::errors::MPCError;
-
-        // Simulate one party
-        let m = 1;
-        let n = 32;
-
-        let pc_gens = PedersenGens::default();
-        let bp_gens = BulletproofGens::new(n, m);
-
-        use self::rand::Rng;
-        let mut rng = rand::thread_rng();
-        let mut transcript = Transcript::new(b"AggregatedRangeProofTest");
-
-        let v0 = rng.gen::<u32>() as u64;
-        let v0_blinding = Scalar::random(&mut rng);
-        let party0 = Party::new(&bp_gens, &pc_gens, v0, v0_blinding, n).unwrap();
-
-        let dealer = Dealer::new(&bp_gens, &pc_gens, &mut transcript, n, m).unwrap();
-
-        // Now do the protocol flow as normal....
-
-        let (party0, bit_com0) = party0.assign_position(0).unwrap();
-
-        let (dealer, bit_challenge) = dealer.receive_bit_commitments(vec![bit_com0]).unwrap();
-
-        let (party0, poly_com0) = party0.apply_challenge(&bit_challenge);
-
-        let (_dealer, mut poly_challenge) =
-            dealer.receive_poly_commitments(vec![poly_com0]).unwrap();
-
-        // But now simulate a malicious dealer choosing x = 0
-        poly_challenge.x = Scalar::ZERO;
-
-        let maybe_share0 = party0.apply_challenge(&poly_challenge);
-
-        assert!(maybe_share0.unwrap_err() == MPCError::MaliciousDealer);
-    }
 }
