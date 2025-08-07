@@ -8,7 +8,6 @@ extern crate rand;
 #[cfg(feature = "std")]
 use self::rand::thread_rng;
 use alloc::vec::Vec;
-
 use core::iter;
 
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
@@ -482,6 +481,14 @@ impl RangeProof {
             l_vec,  // Left vector l(x)
             r_vec,  // Right vector r(x)
         );
+
+        // Following Solana's approach: add inner product proof values to transcript
+        transcript.append_scalar(b"ipp_a", &ipp_proof.a);
+        transcript.append_scalar(b"ipp_b", &ipp_proof.b);
+
+        // Generate challenges for consistency with verifier (though not used in proving)
+        let _c = transcript.challenge_scalar(b"c");  // Unused, for backward compatibility
+        let _d = transcript.challenge_scalar(b"d");  // Unused in prover, but maintains transcript consistency
         
         // === PROOF CONSTRUCTION COMPLETE ===
         // Return the complete range proof and the value commitments
@@ -529,25 +536,7 @@ impl RangeProof {
     }
 
     /// Verifies a rangeproof for a given value commitment \\(V\\).
-    ///
     /// This is a convenience wrapper around `verify_multiple` for the `m=1` case.
-    pub fn verify_single_with_rng<T: RngCore + CryptoRng>(
-        &self,
-        bp_gens: &BulletproofGens,
-        pc_gens: &PedersenGens,
-        transcript: &mut Transcript,
-        V: &CompressedRistretto,
-        n: usize,
-        rng: &mut T,
-    ) -> Result<(), ProofError> {
-        self.verify_multiple_with_rng(bp_gens, pc_gens, transcript, &[*V], n, rng)
-    }
-
-    /// Verifies a rangeproof for a given value commitment \\(V\\).
-    ///
-    /// This is a convenience wrapper around [`RangeProof::verify_single_with_rng`],
-    /// passing in a threadsafe RNG.
-    #[cfg(feature = "std")]
     pub fn verify_single(
         &self,
         bp_gens: &BulletproofGens,
@@ -556,18 +545,18 @@ impl RangeProof {
         V: &CompressedRistretto,
         n: usize,
     ) -> Result<(), ProofError> {
-        self.verify_single_with_rng(bp_gens, pc_gens, transcript, V, n, &mut thread_rng())
+        self.verify_multiple(bp_gens, pc_gens, transcript, &[*V], n)
     }
 
+
     /// Verifies an aggregated rangeproof for the given value commitments.
-    pub fn verify_multiple_with_rng<T: RngCore + CryptoRng>(
+    pub fn verify_multiple(
         &self,
         bp_gens: &BulletproofGens,
         pc_gens: &PedersenGens,
         transcript: &mut Transcript,
         value_commitments: &[CompressedRistretto],
         n: usize,
-        rng: &mut T,
     ) -> Result<(), ProofError> {
         let m = value_commitments.len();
 
@@ -609,14 +598,19 @@ impl RangeProof {
 
         let w = transcript.challenge_scalar(b"w");
 
-        // Challenge value for batching statements to be verified
-        let c = Scalar::random(rng);
-
         let (x_sq, x_inv_sq, s) = self.ipp_proof.verification_scalars(n * m, transcript)?;
         let s_inv = s.iter().rev();
 
         let a = self.ipp_proof.a;
         let b = self.ipp_proof.b;
+
+        // Following Solana's approach: add inner product proof values to transcript
+        transcript.append_scalar(b"ipp_a", &a);
+        transcript.append_scalar(b"ipp_b", &b);
+
+        // Challenge value for batching statements to be verified
+        let _c = transcript.challenge_scalar(b"c");  // Unused, for backward compatibility
+        let d = transcript.challenge_scalar(b"d");   // Pseudorandom batch factor
 
         // Construct concat_z_and_2, an iterator of the values of
         // z^0 * \vec(2)^n || z^1 * \vec(2)^n || ... || z^(m-1) * \vec(2)^n
@@ -632,18 +626,19 @@ impl RangeProof {
             .zip(concat_z_and_2.iter())
             .map(|((s_i_inv, exp_y_inv), z_and_2)| z + exp_y_inv * (zz * z_and_2 - b * s_i_inv));
 
-        let value_commitment_scalars = util::exp_iter(z).take(m).map(|z_exp| c * zz * z_exp);
-        let basepoint_scalar = w * (self.t_x - a * b) + c * (delta(n, m, &y, &z) - self.t_x);
+        let value_commitment_scalars = util::exp_iter(z).take(m).map(|z_exp| d * zz * z_exp);
+        let basepoint_scalar = w * (self.t_x - a * b) + d * (delta(n, m, &y, &z) - self.t_x);
 
         use curve25519_dalek::traits::VartimeMultiscalarMul;
+        use group::Group;
         let mega_check = RistrettoPoint::optional_multiscalar_mul(
             iter::once(Scalar::ONE)
                 .chain(iter::once(x))
-                .chain(iter::once(c * x))
-                .chain(iter::once(c * x * x))
+                .chain(iter::once(d * x))
+                .chain(iter::once(d * x * x))
                 .chain(x_sq.iter().cloned())
                 .chain(x_inv_sq.iter().cloned())
-                .chain(iter::once(-self.e_blinding - c * self.t_x_blinding))
+                .chain(iter::once(-self.e_blinding - d * self.t_x_blinding))
                 .chain(iter::once(basepoint_scalar))
                 .chain(g)
                 .chain(h)
@@ -662,34 +657,11 @@ impl RangeProof {
         )
         .ok_or_else(|| ProofError::VerificationError)?;
 
-        use group::Group;
         if mega_check.is_identity().into() {
             Ok(())
         } else {
             Err(ProofError::VerificationError)
         }
-    }
-
-    /// Verifies an aggregated rangeproof for the given value commitments.
-    /// This is a convenience wrapper around [`RangeProof::verify_multiple_with_rng`],
-    /// passing in a threadsafe RNG.
-    #[cfg(feature = "std")]
-    pub fn verify_multiple(
-        &self,
-        bp_gens: &BulletproofGens,
-        pc_gens: &PedersenGens,
-        transcript: &mut Transcript,
-        value_commitments: &[CompressedRistretto],
-        n: usize,
-    ) -> Result<(), ProofError> {
-        self.verify_multiple_with_rng(
-            bp_gens,
-            pc_gens,
-            transcript,
-            value_commitments,
-            n,
-            &mut thread_rng(),
-        )
     }
 
     /// Serializes the proof into a byte array of \\(2 \lg n + 9\\)
