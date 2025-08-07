@@ -13,30 +13,10 @@ use crate::inner_product_proof::inner_product;
 /// Represents a degree-1 vector polynomial \\(\mathbf{a} + \mathbf{b} \cdot x\\).
 pub struct VecPoly1(pub Vec<Scalar>, pub Vec<Scalar>);
 
-/// Represents a degree-3 vector polynomial
-/// \\(\mathbf{a} + \mathbf{b} \cdot x + \mathbf{c} \cdot x^2 + \mathbf{d} \cdot x^3 \\).
-#[cfg(feature = "yoloproofs")]
-pub struct VecPoly3(
-    pub Vec<Scalar>,
-    pub Vec<Scalar>,
-    pub Vec<Scalar>,
-    pub Vec<Scalar>,
-);
 
 /// Represents a degree-2 scalar polynomial \\(a + b \cdot x + c \cdot x^2\\)
 pub struct Poly2(pub Scalar, pub Scalar, pub Scalar);
 
-/// Represents a degree-6 scalar polynomial, without the zeroth degree
-/// \\(a \cdot x + b \cdot x^2 + c \cdot x^3 + d \cdot x^4 + e \cdot x^5 + f \cdot x^6\\)
-#[cfg(feature = "yoloproofs")]
-pub struct Poly6 {
-    pub t1: Scalar,
-    pub t2: Scalar,
-    pub t3: Scalar,
-    pub t4: Scalar,
-    pub t5: Scalar,
-    pub t6: Scalar,
-}
 
 /// Provides an iterator over the powers of a `Scalar`.
 ///
@@ -109,50 +89,6 @@ impl VecPoly1 {
     }
 }
 
-#[cfg(feature = "yoloproofs")]
-impl VecPoly3 {
-    pub fn zero(n: usize) -> Self {
-        VecPoly3(
-            vec![Scalar::ZERO; n],
-            vec![Scalar::ZERO; n],
-            vec![Scalar::ZERO; n],
-            vec![Scalar::ZERO; n],
-        )
-    }
-
-    /// Compute an inner product of `lhs`, `rhs` which have the property that:
-    /// - `lhs.0` is zero;
-    /// - `rhs.2` is zero;
-    /// This is the case in the constraint system proof.
-    pub fn special_inner_product(lhs: &Self, rhs: &Self) -> Poly6 {
-        // TODO: make checks that l_poly.0 and r_poly.2 are zero.
-
-        let t1 = inner_product(&lhs.1, &rhs.0);
-        let t2 = inner_product(&lhs.1, &rhs.1) + inner_product(&lhs.2, &rhs.0);
-        let t3 = inner_product(&lhs.2, &rhs.1) + inner_product(&lhs.3, &rhs.0);
-        let t4 = inner_product(&lhs.1, &rhs.3) + inner_product(&lhs.3, &rhs.1);
-        let t5 = inner_product(&lhs.2, &rhs.3);
-        let t6 = inner_product(&lhs.3, &rhs.3);
-
-        Poly6 {
-            t1,
-            t2,
-            t3,
-            t4,
-            t5,
-            t6,
-        }
-    }
-
-    pub fn eval(&self, x: Scalar) -> Vec<Scalar> {
-        let n = self.0.len();
-        let mut out = vec![Scalar::ZERO; n];
-        for i in 0..n {
-            out[i] = self.0[i] + x * (self.1[i] + x * (self.2[i] + x * self.3[i]));
-        }
-        out
-    }
-}
 
 impl Poly2 {
     pub fn eval(&self, x: Scalar) -> Scalar {
@@ -160,12 +96,6 @@ impl Poly2 {
     }
 }
 
-#[cfg(feature = "yoloproofs")]
-impl Poly6 {
-    pub fn eval(&self, x: Scalar) -> Scalar {
-        x * (self.t1 + x * (self.t2 + x * (self.t3 + x * (self.t4 + x * (self.t5 + x * self.t6)))))
-    }
-}
 
 impl Drop for VecPoly1 {
     fn drop(&mut self) {
@@ -186,52 +116,8 @@ impl Drop for Poly2 {
     }
 }
 
-#[cfg(feature = "yoloproofs")]
-impl Drop for VecPoly3 {
-    fn drop(&mut self) {
-        for e in self.0.iter_mut() {
-            e.clear();
-        }
-        for e in self.1.iter_mut() {
-            e.clear();
-        }
-        for e in self.2.iter_mut() {
-            e.clear();
-        }
-        for e in self.3.iter_mut() {
-            e.clear();
-        }
-    }
-}
 
-#[cfg(feature = "yoloproofs")]
-impl Drop for Poly6 {
-    fn drop(&mut self) {
-        self.t1.clear();
-        self.t2.clear();
-        self.t3.clear();
-        self.t4.clear();
-        self.t5.clear();
-        self.t6.clear();
-    }
-}
 
-/// Raises `x` to the power `n` using binary exponentiation,
-/// with (1 to 2)*lg(n) scalar multiplications.
-/// TODO: a consttime version of this would be awfully similar to a Montgomery ladder.
-pub fn scalar_exp_vartime(x: &Scalar, mut n: u64) -> Scalar {
-    let mut result = Scalar::ONE;
-    let mut aux = *x; // x, x^2, x^4, x^8, ...
-    while n > 0 {
-        let bit = n & 1;
-        if bit == 1 {
-            result = result * aux;
-        }
-        n = n >> 1;
-        aux = aux * aux; // FIXME: one unnecessary mult at the last step here!
-    }
-    result
-}
 
 /// Takes the sum of all the powers of `x`, up to `n`
 /// If `n` is a power of 2, it uses the efficient algorithm with `2*lg n` multiplications and additions.
@@ -298,32 +184,7 @@ mod tests {
         assert_eq!(Scalar::from(40u64), inner_product(&a, &b));
     }
 
-    /// Raises `x` to the power `n`.
-    fn scalar_exp_vartime_slow(x: &Scalar, n: u64) -> Scalar {
-        let mut result = Scalar::ONE;
-        for _ in 0..n {
-            result = result * x;
-        }
-        result
-    }
 
-    #[test]
-    fn test_scalar_exp() {
-        let x = Scalar::from_bits(
-            *b"\x84\xfc\xbcOx\x12\xa0\x06\xd7\x91\xd9z:'\xdd\x1e!CE\xf7\xb1\xb9Vz\x810sD\x96\x85\xb5\x07",
-        );
-        assert_eq!(scalar_exp_vartime(&x, 0), Scalar::ONE);
-        assert_eq!(scalar_exp_vartime(&x, 1), x);
-        assert_eq!(scalar_exp_vartime(&x, 2), x * x);
-        assert_eq!(scalar_exp_vartime(&x, 3), x * x * x);
-        assert_eq!(scalar_exp_vartime(&x, 4), x * x * x * x);
-        assert_eq!(scalar_exp_vartime(&x, 5), x * x * x * x * x);
-        assert_eq!(scalar_exp_vartime(&x, 64), scalar_exp_vartime_slow(&x, 64));
-        assert_eq!(
-            scalar_exp_vartime(&x, 0b11001010),
-            scalar_exp_vartime_slow(&x, 0b11001010)
-        );
-    }
 
     #[test]
     fn test_sum_of_powers() {

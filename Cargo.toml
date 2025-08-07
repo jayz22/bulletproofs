@@ -24,7 +24,6 @@ sha3 = { version = "0.10", default-features = false }
 digest = { version = "0.10", default-features = false }
 rand_core = { version = "0.6", default-features = false, features = ["alloc"] }
 rand = { version = "0.8", default-features = false, optional = true }
-byteorder = { version = "1", default-features = false }
 serde = { version = "1", default-features = false, features = ["alloc"] }
 serde_derive = { version = "1", default-features = false }
 thiserror = { version = "1", optional = true }
@@ -40,18 +39,11 @@ curve25519-dalek = { version = "4.1.1", features = ["digest", "group", "legacy_c
 
 [features]
 default = ["std"]
-yoloproofs = []
 std = ["rand", "rand/std", "rand/std_rng", "thiserror"]
-nightly = ["subtle/nightly", "clear_on_drop/nightly"]
-docs = ["nightly"]
 
 
 [[test]]
 name = "range_proof"
-
-[[test]]
-name = "r1cs"
-required-features = ["yoloproofs"]
 
 [[bench]]
 name = "range_proof"
@@ -59,13 +51,4 @@ harness = false
 
 [[bench]]
 name = "generators"
-harness = false
-
-[[bench]]
-name = "r1cs"
-harness = false
-required-features = ["yoloproofs"]
-
-[[bench]]
-name = "linear_proof"
 harness = false

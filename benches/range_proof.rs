@@ -1,28 +1,20 @@
 #![allow(non_snake_case)]
-#[macro_use]
-extern crate criterion;
-use criterion::Criterion;
 
-use rand;
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::Rng;
-
 use curve25519_dalek::scalar::Scalar;
-
 use merlin::Transcript;
-
-use bulletproofs::RangeProof;
-use bulletproofs::{BulletproofGens, PedersenGens};
+use bulletproofs::{RangeProof, BulletproofGens, PedersenGens};
 
 static AGGREGATION_SIZES: [usize; 6] = [1, 2, 4, 8, 16, 32];
 
 fn create_aggregated_rangeproof_helper(n: usize, c: &mut Criterion) {
-    let label = format!("Aggregated {}-bit rangeproof creation", n);
-
-    c.bench_function_over_inputs(
-        &label,
-        move |b, &&m| {
+    let mut group = c.benchmark_group(format!("Aggregated {}-bit rangeproof creation", n));
+    
+    for &m in &AGGREGATION_SIZES {
+        group.bench_with_input(BenchmarkId::from_parameter(m), &m, |b, &m| {
             let pc_gens = PedersenGens::default();
-            let bp_gens = BulletproofGens::new(n, m);
+            let bp_gens = BulletproofGens::new(n * m);
             let mut rng = rand::thread_rng();
 
             let (min, max) = (0u64, ((1u128 << n) - 1) as u64);
@@ -33,18 +25,18 @@ fn create_aggregated_rangeproof_helper(n: usize, c: &mut Criterion) {
                 // Each proof creation requires a clean transcript.
                 let mut transcript = Transcript::new(b"AggregateRangeProofBenchmark");
 
-                RangeProof::prove_multiple(
+                black_box(RangeProof::prove_multiple(
                     &bp_gens,
                     &pc_gens,
                     &mut transcript,
                     &values,
                     &blindings,
                     n,
-                )
-            })
-        },
-        &AGGREGATION_SIZES,
-    );
+                ).unwrap())
+            });
+        });
+    }
+    group.finish();
 }
 
 fn create_aggregated_rangeproof_n_8(c: &mut Criterion) {
@@ -64,13 +56,12 @@ fn create_aggregated_rangeproof_n_64(c: &mut Criterion) {
 }
 
 fn verify_aggregated_rangeproof_helper(n: usize, c: &mut Criterion) {
-    let label = format!("Aggregated {}-bit rangeproof verification", n);
-
-    c.bench_function_over_inputs(
-        &label,
-        move |b, &&m| {
+    let mut group = c.benchmark_group(format!("Aggregated {}-bit rangeproof verification", n));
+    
+    for &m in &AGGREGATION_SIZES {
+        group.bench_with_input(BenchmarkId::from_parameter(m), &m, |b, &m| {
             let pc_gens = PedersenGens::default();
-            let bp_gens = BulletproofGens::new(n, m);
+            let bp_gens = BulletproofGens::new(n * m);
             let mut rng = rand::thread_rng();
 
             let (min, max) = (0u64, ((1u128 << n) - 1) as u64);
@@ -89,14 +80,14 @@ fn verify_aggregated_rangeproof_helper(n: usize, c: &mut Criterion) {
             .unwrap();
 
             b.iter(|| {
-                // Each proof creation requires a clean transcript.
+                // Each verification requires a clean transcript.
                 let mut transcript = Transcript::new(b"AggregateRangeProofBenchmark");
 
-                proof.verify_multiple(&bp_gens, &pc_gens, &mut transcript, &value_commitments, n)
+                black_box(proof.verify_multiple(&bp_gens, &pc_gens, &mut transcript, &value_commitments, n).unwrap())
             });
-        },
-        &AGGREGATION_SIZES,
-    );
+        });
+    }
+    group.finish();
 }
 
 fn verify_aggregated_rangeproof_n_8(c: &mut Criterion) {
