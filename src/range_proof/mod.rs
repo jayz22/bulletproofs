@@ -96,7 +96,7 @@ impl RangeProof {
     ///
     /// // Generators for Bulletproofs, valid for proofs up to bitsize 64
     /// // and aggregation size up to 1.
-    /// let bp_gens = BulletproofGens::new(64, 1);
+    /// let bp_gens = BulletproofGens::new(64);
     ///
     /// // A secret value we want to prove lies in the range [0, 2^32)
     /// let secret_value = 1037578891u64;
@@ -195,7 +195,7 @@ impl RangeProof {
     ///
     /// // Generators for Bulletproofs, valid for proofs up to bitsize 64
     /// // and aggregation size up to 16.
-    /// let bp_gens = BulletproofGens::new(64, 16);
+    /// let bp_gens = BulletproofGens::new(1024); // 64 * 16 = 1024 total capacity
     ///
     /// // Four secret values we want to prove lie in the range [0, 2^32)
     /// let secrets = [4242344947u64, 3718732727u64, 2255562556u64, 2526146994u64];
@@ -266,12 +266,9 @@ impl RangeProof {
             return Err(ProofError::InvalidAggregation);
         }
 
-        // Ensure we have sufficient generators for the proof dimensions
-        if bp_gens.gens_capacity < n {
-            return Err(ProofError::InvalidGeneratorsLength);
-        }
-
-        if bp_gens.party_capacity < m {
+        // Ensure we have sufficient generators for the total proof dimensions
+        // In the flat system, we need n*m total generators
+        if bp_gens.gens_capacity < (n * m) {
             return Err(ProofError::InvalidGeneratorsLength);
         }
 
@@ -320,7 +317,8 @@ impl RangeProof {
         let mut A = pc_gens.B_blinding * a_blinding;
         
         // Iterate through generator pairs (G_i, H_i) for each bit position
-        let mut gens_iter = bp_gens.G(n, m).zip(bp_gens.H(n, m));
+        // Using flat generators: total dimension = n * m
+        let mut gens_iter = bp_gens.G(n * m).zip(bp_gens.H(n * m));
         for &value in values {
             for i in 0..n {  // Process each bit position (LSB first)
                 let (G_i, H_i) = gens_iter.next().unwrap();
@@ -348,8 +346,8 @@ impl RangeProof {
             iter::once(s_blinding).chain(s_L.iter().cloned()).chain(s_R.iter().cloned()),
             // Points: [B, G[0], ..., G[nm-1], H[0], ..., H[nm-1]]
             iter::once(&pc_gens.B_blinding)
-                .chain(bp_gens.G(n, m))
-                .chain(bp_gens.H(n, m)),
+                .chain(bp_gens.G(n * m))
+                .chain(bp_gens.H(n * m)),
         );
         
         // === FIAT-SHAMIR CHALLENGE DERIVATION ===
@@ -476,8 +474,8 @@ impl RangeProof {
             &Q,  // Generator for inner product term
             &G_factors,  // Scaling factors for G generators
             &H_factors,  // Scaling factors for H generators (y^(-i))
-            bp_gens.G(n, m).cloned().collect(),  // G generator vector
-            bp_gens.H(n, m).cloned().collect(),  // H generator vector
+            bp_gens.G(n * m).cloned().collect(),  // G generator vector
+            bp_gens.H(n * m).cloned().collect(),  // H generator vector
             l_vec,  // Left vector l(x)
             r_vec,  // Right vector r(x)
         );
@@ -575,12 +573,11 @@ impl RangeProof {
         if !(n == 8 || n == 16 || n == 32 || n == 64) {
             return Err(ProofError::InvalidBitsize);
         }
-        if bp_gens.gens_capacity < n {
+        // Ensure we have sufficient generators for verification (n*m total dimensions)
+        if bp_gens.gens_capacity < (n * m) {
             return Err(ProofError::InvalidGeneratorsLength);
         }
-        if bp_gens.party_capacity < m {
-            return Err(ProofError::InvalidGeneratorsLength);
-        }
+        // Party capacity check no longer needed in flat single-party system
 
         transcript.rangeproof_domain_sep(n as u64, m as u64);
 
@@ -656,8 +653,8 @@ impl RangeProof {
                 .chain(self.ipp_proof.R_vec.iter().map(|R| R.decompress()))
                 .chain(iter::once(Some(pc_gens.B_blinding)))
                 .chain(iter::once(Some(pc_gens.B)))
-                .chain(bp_gens.G(n, m).map(|&x| Some(x)))
-                .chain(bp_gens.H(n, m).map(|&x| Some(x)))
+                .chain(bp_gens.G(n * m).map(|&x| Some(x)))
+                .chain(bp_gens.H(n * m).map(|&x| Some(x)))
                 .chain(value_commitments.iter().map(|V| V.decompress())),
         )
         .ok_or_else(|| ProofError::VerificationError)?;
@@ -860,7 +857,7 @@ mod tests {
         let max_bitsize = 64;
         let max_parties = 8;
         let pc_gens = PedersenGens::default();
-        let bp_gens = BulletproofGens::new(max_bitsize, max_parties);
+        let bp_gens = BulletproofGens::new(max_bitsize * max_parties);
 
         // Prover's scope
         let (proof_bytes, value_commitments) = {

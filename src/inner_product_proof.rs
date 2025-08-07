@@ -434,9 +434,9 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         use crate::generators::BulletproofGens;
-        let bp_gens = BulletproofGens::new(n, 1);
-        let G: Vec<RistrettoPoint> = bp_gens.share(0).G(n).cloned().collect();
-        let H: Vec<RistrettoPoint> = bp_gens.share(0).H(n).cloned().collect();
+        let bp_gens = BulletproofGens::new(n);
+        let G: Vec<RistrettoPoint> = bp_gens.G(n).cloned().collect();
+        let H: Vec<RistrettoPoint> = bp_gens.H(n).cloned().collect();
 
         // Q would be determined upstream in the protocol, so we pick a random one.
         let Q = RistrettoPoint::hash_from_bytes::<Sha3_512>(b"test point");

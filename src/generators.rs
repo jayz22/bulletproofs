@@ -99,258 +99,197 @@ impl Iterator for GeneratorsChain {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (usize::max_value(), None)
+        (usize::MAX, None)
     }
 }
 
 /// The `BulletproofGens` struct contains all the generators needed
-/// for aggregating up to `m` range proofs of up to `n` bits each.
+/// for single-party range proofs up to `n` total dimensions.
 ///
-/// # Extensible Generator Generation
+/// # Simplified Single-Party Generation (following Solana's approach)
 ///
-/// Instead of constructing a single vector of size `m*n`, as
-/// described in the Bulletproofs paper, we construct each party's
-/// generators separately.
+/// This implementation uses a flat generator system optimized for single-party
+/// range proofs, removing the multi-party complexity of the original design.
+/// We construct a single vector of generators using SHAKE256 with simple
+/// domain separation labels "G" and "H".
 ///
-/// To construct an arbitrary-length chain of generators, we apply
-/// SHAKE256 to a domain separator label, and feed each 64 bytes of
-/// XOF output into the `ristretto255` hash-to-group function.
-/// Each of the `m` parties' generators are constructed using a
-/// different domain separation label, and proving and verification
-/// uses the first `n` elements of the arbitrary-length chain.
+/// This approach is:
+/// - More efficient for single-party proofs (no aggregation overhead)
+/// - Simpler to understand and maintain
+/// - Compatible with Solana's range proof implementation
+/// - Sufficient for confidential transaction use cases
 ///
-/// This means that the aggregation size (number of
-/// parties) is orthogonal to the rangeproof size (number of bits),
-/// and allows using the same `BulletproofGens` object for different
-/// proving parameters.
-///
-/// This construction is also forward-compatible with constraint
-/// system proofs, which use a much larger slice of the generator
-/// chain, and even forward-compatible to multiparty aggregation of
-/// constraint system proofs, since the generators are namespaced by
-/// their party index.
+/// The total capacity represents the maximum number of generators available,
+/// which should be set to the maximum expected total dimensions (sum of bit
+/// lengths across all values in an aggregated proof).
 #[derive(Clone)]
 pub struct BulletproofGens {
-    /// The maximum number of usable generators for each party.
+    /// The maximum number of usable generators.
     pub gens_capacity: usize,
-    /// Number of values or parties
-    pub party_capacity: usize,
-    /// Precomputed \\(\mathbf G\\) generators for each party.
-    G_vec: Vec<Vec<RistrettoPoint>>,
-    /// Precomputed \\(\mathbf H\\) generators for each party.
-    H_vec: Vec<Vec<RistrettoPoint>>,
+    /// Precomputed \\(\mathbf G\\) generators (flat vector).
+    G_vec: Vec<RistrettoPoint>,
+    /// Precomputed \\(\mathbf H\\) generators (flat vector).
+    H_vec: Vec<RistrettoPoint>,
 }
 
 impl BulletproofGens {
-    /// Create a new `BulletproofGens` object.
+    /// Create a new `BulletproofGens` object for single-party range proofs.
     ///
     /// # Inputs
     ///
-    /// * `gens_capacity` is the number of generators to precompute
-    ///    for each party.  For rangeproofs, it is sufficient to pass
-    ///    `64`, the maximum bitsize of the rangeproofs.  For circuit
-    ///    proofs, the capacity must be greater than the number of
-    ///    multipliers, rounded up to the next power of two.
+    /// * `gens_capacity` is the total number of generators to precompute.
+    ///   For range proofs, this should be the maximum expected total dimension
+    ///   (sum of bit lengths across all values). For example:
+    ///   - Single 64-bit proof: 64
+    ///   - Two 32-bit proofs: 64  
+    ///   - Four 64-bit proofs: 256
+    ///   - Eight 32-bit proofs: 256
     ///
-    /// * `party_capacity` is the maximum number of parties that can
-    ///    produce an aggregated proof.
-    pub fn new(gens_capacity: usize, party_capacity: usize) -> Self {
+    /// This simplified constructor matches Solana's approach and removes
+    /// the multi-party complexity that's not needed for confidential transactions.
+    pub fn new(gens_capacity: usize) -> Self {
         let mut gens = BulletproofGens {
             gens_capacity: 0,
-            party_capacity,
-            G_vec: (0..party_capacity).map(|_| Vec::new()).collect(),
-            H_vec: (0..party_capacity).map(|_| Vec::new()).collect(),
+            G_vec: Vec::new(),
+            H_vec: Vec::new(),
         };
         gens.increase_capacity(gens_capacity);
         gens
     }
-
-    /// Returns j-th share of generators, with an appropriate
-    /// slice of vectors G and H for the j-th range proof.
-    pub fn share(&self, j: usize) -> BulletproofGensShare<'_> {
-        BulletproofGensShare {
-            gens: &self,
-            share: j,
-        }
-    }
+    
 
     /// Increases the generators' capacity to the amount specified.
     /// If less than or equal to the current capacity, does nothing.
+    /// 
+    /// This implementation follows Solana's approach with simple "G" and "H" labels.
     pub fn increase_capacity(&mut self, new_capacity: usize) {
-        use byteorder::{ByteOrder, LittleEndian};
-
         if self.gens_capacity >= new_capacity {
             return;
         }
 
-        for i in 0..self.party_capacity {
-            let party_index = i as u32;
-            let mut label = [b'G', 0, 0, 0, 0];
-            LittleEndian::write_u32(&mut label[1..5], party_index);
-            self.G_vec[i].extend(
-                &mut GeneratorsChain::new(&label)
-                    .fast_forward(self.gens_capacity)
-                    .take(new_capacity - self.gens_capacity),
-            );
+        // Generate additional G generators using simple "G" label (Solana approach)
+        self.G_vec.extend(
+            &mut GeneratorsChain::new(b"G")
+                .fast_forward(self.gens_capacity)
+                .take(new_capacity - self.gens_capacity),
+        );
 
-            label[0] = b'H';
-            self.H_vec[i].extend(
-                &mut GeneratorsChain::new(&label)
-                    .fast_forward(self.gens_capacity)
-                    .take(new_capacity - self.gens_capacity),
-            );
-        }
+        // Generate additional H generators using simple "H" label (Solana approach)  
+        self.H_vec.extend(
+            &mut GeneratorsChain::new(b"H")
+                .fast_forward(self.gens_capacity)
+                .take(new_capacity - self.gens_capacity),
+        );
+
         self.gens_capacity = new_capacity;
     }
 
-    /// Return an iterator over the aggregation of the parties' G generators with given size `n`.
-    pub(crate) fn G(&self, n: usize, m: usize) -> impl Iterator<Item = &RistrettoPoint> {
-        AggregatedGensIter {
-            n,
-            m,
+    /// Return an iterator over the first `n` G generators.
+    /// This simplified interface matches Solana's approach for single-party proofs.
+    pub(crate) fn G(&self, n: usize) -> impl Iterator<Item = &RistrettoPoint> {
+        FlatGensIter {
             array: &self.G_vec,
-            party_idx: 0,
+            n,
             gen_idx: 0,
         }
     }
 
-    /// Return an iterator over the aggregation of the parties' H generators with given size `n`.
-    pub(crate) fn H(&self, n: usize, m: usize) -> impl Iterator<Item = &RistrettoPoint> {
-        AggregatedGensIter {
-            n,
-            m,
+    /// Return an iterator over the first `n` H generators.
+    /// This simplified interface matches Solana's approach for single-party proofs.
+    pub(crate) fn H(&self, n: usize) -> impl Iterator<Item = &RistrettoPoint> {
+        FlatGensIter {
             array: &self.H_vec,
-            party_idx: 0,
+            n,
             gen_idx: 0,
         }
     }
+    
 }
 
-struct AggregatedGensIter<'a> {
-    array: &'a Vec<Vec<RistrettoPoint>>,
+/// Simple iterator over a flat vector of generators (following Solana's approach).
+/// This replaces the complex AggregatedGensIter used for multi-party proofs.
+struct FlatGensIter<'a> {
+    array: &'a Vec<RistrettoPoint>,
     n: usize,
-    m: usize,
-    party_idx: usize,
     gen_idx: usize,
 }
 
-impl<'a> Iterator for AggregatedGensIter<'a> {
+impl<'a> Iterator for FlatGensIter<'a> {
     type Item = &'a RistrettoPoint;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.gen_idx >= self.n {
-            self.gen_idx = 0;
-            self.party_idx += 1;
-        }
-
-        if self.party_idx >= self.m {
             None
         } else {
             let cur_gen = self.gen_idx;
             self.gen_idx += 1;
-            Some(&self.array[self.party_idx][cur_gen])
+            Some(&self.array[cur_gen])
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let size = self.n * (self.m - self.party_idx) - self.gen_idx;
+        let size = self.n - self.gen_idx;
         (size, Some(size))
     }
 }
 
-/// Represents a view of the generators used by a specific party in an
-/// aggregated proof.
-///
-/// The `BulletproofGens` struct represents generators for an aggregated
-/// range proof `m` proofs of `n` bits each; the `BulletproofGensShare`
-/// provides a view of the generators for one of the `m` parties' shares.
-///
-/// The `BulletproofGensShare` is produced by [`BulletproofGens::share()`].
-#[derive(Copy, Clone)]
-pub struct BulletproofGensShare<'a> {
-    /// The parent object that this is a view into
-    gens: &'a BulletproofGens,
-    /// Which share we are
-    share: usize,
-}
-
-impl<'a> BulletproofGensShare<'a> {
-    /// Return an iterator over this party's G generators with given size `n`.
-    pub fn G(&self, n: usize) -> impl Iterator<Item = &'a RistrettoPoint> {
-        self.gens.G_vec[self.share].iter().take(n)
-    }
-
-    /// Return an iterator over this party's H generators with given size `n`.
-    pub(crate) fn H(&self, n: usize) -> impl Iterator<Item = &'a RistrettoPoint> {
-        self.gens.H_vec[self.share].iter().take(n)
-    }
-}
+// BulletproofGensShare is no longer needed in the single-party design.
+// The simplified BulletproofGens directly provides access to generators
+// without the complexity of party-specific shares.
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn aggregated_gens_iter_matches_flat_map() {
-        let gens = BulletproofGens::new(64, 8);
+    fn flat_gens_work_correctly() {
+        let gens = BulletproofGens::new(512);
 
-        let helper = |n: usize, m: usize| {
-            let agg_G: Vec<RistrettoPoint> = gens.G(n, m).cloned().collect();
-            let flat_G: Vec<RistrettoPoint> = gens
-                .G_vec
-                .iter()
-                .take(m)
-                .flat_map(move |G_j| G_j.iter().take(n))
-                .cloned()
-                .collect();
-
-            let agg_H: Vec<RistrettoPoint> = gens.H(n, m).cloned().collect();
-            let flat_H: Vec<RistrettoPoint> = gens
-                .H_vec
-                .iter()
-                .take(m)
-                .flat_map(move |H_j| H_j.iter().take(n))
-                .cloned()
-                .collect();
-
-            assert_eq!(agg_G, flat_G);
-            assert_eq!(agg_H, flat_H);
+        let helper = |n: usize| {
+            let G_iter: Vec<RistrettoPoint> = gens.G(n).cloned().collect();
+            let H_iter: Vec<RistrettoPoint> = gens.H(n).cloned().collect();
+            
+            // Check that we get the expected number of generators
+            assert_eq!(G_iter.len(), n);
+            assert_eq!(H_iter.len(), n);
+            
+            // Check that generators are deterministic (same on repeated calls)
+            let G_iter2: Vec<RistrettoPoint> = gens.G(n).cloned().collect();
+            let H_iter2: Vec<RistrettoPoint> = gens.H(n).cloned().collect();
+            assert_eq!(G_iter, G_iter2);
+            assert_eq!(H_iter, H_iter2);
+            
+            // Check that G and H generators are different
+            assert_ne!(G_iter, H_iter);
         };
 
-        helper(64, 8);
-        helper(64, 4);
-        helper(64, 2);
-        helper(64, 1);
-        helper(32, 8);
-        helper(32, 4);
-        helper(32, 2);
-        helper(32, 1);
-        helper(16, 8);
-        helper(16, 4);
-        helper(16, 2);
-        helper(16, 1);
+        helper(64);
+        helper(128);
+        helper(256);
+        helper(512);
     }
 
     #[test]
     fn resizing_small_gens_matches_creating_bigger_gens() {
-        let gens = BulletproofGens::new(64, 8);
+        let gens = BulletproofGens::new(512);
 
-        let mut gen_resized = BulletproofGens::new(32, 8);
-        gen_resized.increase_capacity(64);
+        let mut gen_resized = BulletproofGens::new(256);
+        gen_resized.increase_capacity(512);
 
-        let helper = |n: usize, m: usize| {
-            let gens_G: Vec<RistrettoPoint> = gens.G(n, m).cloned().collect();
-            let gens_H: Vec<RistrettoPoint> = gens.H(n, m).cloned().collect();
+        let helper = |n: usize| {
+            let gens_G: Vec<RistrettoPoint> = gens.G(n).cloned().collect();
+            let gens_H: Vec<RistrettoPoint> = gens.H(n).cloned().collect();
 
-            let resized_G: Vec<RistrettoPoint> = gen_resized.G(n, m).cloned().collect();
-            let resized_H: Vec<RistrettoPoint> = gen_resized.H(n, m).cloned().collect();
+            let resized_G: Vec<RistrettoPoint> = gen_resized.G(n).cloned().collect();
+            let resized_H: Vec<RistrettoPoint> = gen_resized.H(n).cloned().collect();
 
             assert_eq!(gens_G, resized_G);
             assert_eq!(gens_H, resized_H);
         };
 
-        helper(64, 8);
-        helper(32, 8);
-        helper(16, 8);
+        helper(512);
+        helper(256);
+        helper(128);
+        helper(64);
     }
 }
