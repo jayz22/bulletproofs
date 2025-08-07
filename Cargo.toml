@@ -28,7 +28,7 @@ serde = { version = "1", default-features = false, features = ["alloc"] }
 serde_derive = { version = "1", default-features = false }
 thiserror = { version = "1", optional = true }
 merlin = { version = "3", default-features = false }
-clear_on_drop = { version = "0.2", default-features = false }
+clear_on_drop = { version = "0.2", default-features = false, optional = true }
 
 [dev-dependencies]
 hex = "0.3"
@@ -39,7 +39,7 @@ curve25519-dalek = { version = "4.1.1", features = ["digest", "group", "legacy_c
 
 [features]
 default = ["std"]
-std = ["rand", "rand_core", "rand/std", "rand/std_rng", "thiserror", "curve25519-dalek/rand_core"]
+std = ["rand", "rand_core", "rand/std", "rand/std_rng", "thiserror", "curve25519-dalek/rand_core", "clear_on_drop"]
 
 
 [[test]]

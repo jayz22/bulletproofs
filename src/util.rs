@@ -5,6 +5,7 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(feature = "std")]
 use clear_on_drop::clear::Clear;
 use curve25519_dalek::scalar::Scalar;
 
@@ -97,6 +98,7 @@ impl Poly2 {
 }
 
 
+#[cfg(feature = "std")]
 impl Drop for VecPoly1 {
     fn drop(&mut self) {
         for e in self.0.iter_mut() {
@@ -108,6 +110,7 @@ impl Drop for VecPoly1 {
     }
 }
 
+#[cfg(feature = "std")]
 impl Drop for Poly2 {
     fn drop(&mut self) {
         self.0.clear();
@@ -212,6 +215,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "std")]
     fn vec_of_scalars_clear_on_drop() {
         let mut v = vec![Scalar::from(24u64), Scalar::from(42u64)];
 
@@ -232,6 +236,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "std")]
     fn tuple_of_scalars_clear_on_drop() {
         let mut v = Poly2(
             Scalar::from(24u64),
