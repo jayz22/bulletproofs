@@ -34,6 +34,9 @@ use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
 /// verifying aggregated range proofs.  The single-value case is
 /// implemented as a special case of aggregated range proofs.
 ///
+/// This implementation implements a non-interactive range proof aggregation that is specified in
+/// the original Bulletproofs [paper](https://eprint.iacr.org/2017/1066) (Section 4.3).
+///
 /// The bitsize of the range, as well as the list of commitments to
 /// the values, are not included in the proof, and must be known to
 /// the verifier.
