@@ -19,6 +19,7 @@ use crate::inner_product_proof::InnerProductProof;
 use crate::transcript::TranscriptProtocol;
 use crate::util;
 
+#[cfg(feature = "std")]
 use rand_core::{CryptoRng, RngCore};
 use serde::de::Visitor;
 use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
@@ -128,6 +129,7 @@ impl RangeProof {
     /// );
     /// # }
     /// ```
+    #[cfg(feature = "std")]
     pub fn prove_single_with_rng<T: RngCore + CryptoRng>(
         bp_gens: &BulletproofGens,
         pc_gens: &PedersenGens,
@@ -240,6 +242,7 @@ impl RangeProof {
     /// 4. Construct polynomial l(x), r(x) with coefficients based on bit decompositions
     /// 5. Compute polynomial t(x) = <l(x), r(x)> and commit to its coefficients
     /// 6. Evaluate polynomials at challenge point x and create inner product proof
+    #[cfg(feature = "std")]
     pub fn prove_multiple_with_rng<T: RngCore + CryptoRng>(
         bp_gens: &BulletproofGens,
         pc_gens: &PedersenGens,

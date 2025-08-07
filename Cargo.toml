@@ -17,12 +17,12 @@ description = "A pure-Rust implementation of Bulletproofs using Ristretto"
 edition = "2018"
 
 [dependencies]
-curve25519-dalek = { version = "4.1.1", features = ["digest", "group", "rand_core", "serde"] }
+curve25519-dalek = { version = "4.1.1", features = ["digest", "group", "serde"] }
 group = { version = "0.13", default-features = false }
 subtle = { version = "2.5", default-features = false }
 sha3 = { version = "0.10", default-features = false }
 digest = { version = "0.10", default-features = false }
-rand_core = { version = "0.6", default-features = false, features = ["alloc"] }
+rand_core = { version = "0.6", default-features = false, features = ["alloc"], optional = true }
 rand = { version = "0.8", default-features = false, optional = true }
 serde = { version = "1", default-features = false, features = ["alloc"] }
 serde_derive = { version = "1", default-features = false }
@@ -39,7 +39,7 @@ curve25519-dalek = { version = "4.1.1", features = ["digest", "group", "legacy_c
 
 [features]
 default = ["std"]
-std = ["rand", "rand/std", "rand/std_rng", "thiserror"]
+std = ["rand", "rand_core", "rand/std", "rand/std_rng", "thiserror", "curve25519-dalek/rand_core"]
 
 
 [[test]]
@@ -52,3 +52,4 @@ harness = false
 [[bench]]
 name = "generators"
 harness = false
+
